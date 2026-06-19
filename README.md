@@ -261,48 +261,254 @@ Manual checklist:
 
 ## Deployment
 
-Backend deployment target: Render or Railway using `backend/Dockerfile`.
+Production deployment uses three services:
 
-Backend start command:
+- Frontend: Vercel
+- Backend: AWS EC2 Ubuntu server
+- Database: Neon PostgreSQL with pgvector enabled
 
-```bash
-alembic upgrade head
-uvicorn app.main:app --host 0.0.0.0 --port $PORT
+### 1. Create Neon PostgreSQL Database
+
+1. Create a Neon account and make a new project.
+2. Create or select the production database.
+3. Open the Neon SQL editor and enable pgvector:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
 ```
 
-Frontend deployment target: Vercel using `frontend/vercel.json`.
-
-Frontend build command:
-
-```bash
-npm run build
-```
-
-Database target: Neon or Supabase PostgreSQL with pgvector enabled.
-
-Set production CORS with:
+4. Copy the Neon connection string. Use the pooled or direct URL, but keep SSL enabled:
 
 ```env
-FRONTEND_URL=https://your-vercel-app.vercel.app
+DATABASE_URL=postgresql://USER:PASSWORD@HOST.neon.tech/DBNAME?sslmode=require
+```
+
+This `DATABASE_URL` is used only by the backend. Do not add it to Vercel frontend variables.
+
+### 2. Deploy Backend on AWS EC2
+
+Launch an EC2 instance:
+
+- AMI: Ubuntu Server LTS
+- Instance type: `t3.small` or larger
+- Storage: 20 GB gp3
+- Security group inbound rules:
+  - SSH `22` from your IP only
+  - HTTP `80` from anywhere
+  - HTTPS `443` from anywhere
+  - Do not expose backend port `8000`
+
+Connect to the server:
+
+```bash
+ssh -i path/to/key.pem ubuntu@YOUR_EC2_PUBLIC_IP
+```
+
+Install required packages:
+
+```bash
+sudo apt update
+sudo apt upgrade -y
+sudo apt install -y python3-venv python3-pip nginx git certbot python3-certbot-nginx
+```
+
+Clone the project:
+
+```bash
+cd /home/ubuntu
+git clone https://github.com/YOUR_USERNAME/healthcare-appointment-system.git
+cd healthcare-appointment-system/backend
+```
+
+Create the backend virtual environment:
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+Create the production environment file:
+
+```bash
+cp ../deploy/aws/backend.env.production.example .env
+nano .env
+```
+
+Set at least these backend values:
+
+```env
+ENVIRONMENT=production
+DATABASE_URL=postgresql://USER:PASSWORD@HOST.neon.tech/DBNAME?sslmode=require
+JWT_SECRET_KEY=replace-with-a-strong-secret
 CORS_ORIGINS=https://your-vercel-app.vercel.app
-```
-
-Use HTTPS in production and store all provider keys only in backend environment variables.
-
-For Brevo SMTP, set:
-
-```env
+FRONTEND_URL=https://your-vercel-app.vercel.app
+OPENAI_API_KEY=
+TRIAGE_USE_LLM=false
+TRIAGE_FALLBACK_RULES=true
+EMBEDDING_PROVIDER=local
 EMAIL_PROVIDER=smtp
 SMTP_HOST=smtp-relay.brevo.com
 SMTP_PORT=587
 SMTP_USER=your-brevo-smtp-login
 SMTP_PASSWORD=your-brevo-smtp-key
-SMTP_FROM_EMAIL=your-verified-brevo-sender@example.com
+SMTP_FROM_EMAIL=your-verified-sender@example.com
 SMTP_FROM_NAME=Healthcare Appointments
 SMTP_USE_TLS=true
 SMTP_TIMEOUT_SECONDS=10
 ```
 
+Generate a strong JWT secret if needed:
+
+```bash
+openssl rand -hex 32
+```
+
+Run migrations and seed data:
+
+```bash
+alembic upgrade head
+python -m app.db.seed
+```
+
+Test the backend locally on EC2:
+
+```bash
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+In another SSH tab:
+
+```bash
+curl http://127.0.0.1:8000/
+```
+
+Stop the test server with `Ctrl+C`.
+
+Install the systemd service:
+
+```bash
+cd /home/ubuntu/healthcare-appointment-system
+sudo cp deploy/aws/healthcare-api.service.example /etc/systemd/system/healthcare-api.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now healthcare-api
+sudo systemctl status healthcare-api
+```
+
+Configure Nginx:
+
+```bash
+sudo cp deploy/aws/nginx-healthcare-api.conf.example /etc/nginx/sites-available/healthcare-api
+sudo nano /etc/nginx/sites-available/healthcare-api
+```
+
+Replace `api.yourdomain.com` with your real API domain, then enable the site:
+
+```bash
+sudo ln -s /etc/nginx/sites-available/healthcare-api /etc/nginx/sites-enabled/healthcare-api
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+Point your domain DNS to the EC2 public IP:
+
+```text
+api.yourdomain.com -> YOUR_EC2_PUBLIC_IP
+```
+
+Enable HTTPS:
+
+```bash
+sudo certbot --nginx -d api.yourdomain.com
+```
+
+Check the production backend:
+
+```bash
+curl https://api.yourdomain.com/
+curl https://api.yourdomain.com/specialties
+```
+
+Useful backend commands:
+
+```bash
+sudo systemctl restart healthcare-api
+journalctl -u healthcare-api -f
+```
+
+### 3. Deploy Frontend on Vercel
+
+Push the project to GitHub first.
+
+In Vercel:
+
+1. Click `Add New Project`.
+2. Import the GitHub repository.
+3. Set the root directory to `frontend`.
+4. Keep framework preset as `Vite`.
+5. Set build command:
+
+```bash
+npm run build
+```
+
+6. Set output directory:
+
+```bash
+dist
+```
+
+7. Add this environment variable:
+
+```env
+VITE_API_BASE_URL=https://api.yourdomain.com
+```
+
+8. Deploy the project.
+
+The frontend already includes `frontend/vercel.json`, which sends React Router page refreshes back to `index.html`.
+
+After Vercel gives you the final frontend URL, update the EC2 backend `.env`:
+
+```env
+CORS_ORIGINS=https://your-vercel-app.vercel.app
+FRONTEND_URL=https://your-vercel-app.vercel.app
+```
+
+Restart the backend:
+
+```bash
+sudo systemctl restart healthcare-api
+```
+
+### 4. Production Verification
+
+Check the backend:
+
+```bash
+curl https://api.yourdomain.com/
+curl https://api.yourdomain.com/specialties
+```
+
+Check the frontend:
+
+- Open the Vercel URL.
+- Register a patient.
+- Log in.
+- Complete the patient profile.
+- Run symptom triage.
+- View recommended doctors.
+- Book an appointment.
+- Confirm the appointment appears in the patient, doctor, and admin dashboards.
+
+### 5. Production Notes
+
+- Keep `DATABASE_URL`, `JWT_SECRET_KEY`, `OPENAI_API_KEY`, SMTP keys, SendGrid keys, and Twilio keys only on the EC2 backend.
+- Only expose `VITE_API_BASE_URL` in Vercel.
+- Use HTTPS for both frontend and backend.
+- Restrict SSH access to your own IP.
+- If Neon shows stale connection errors, set `DB_POOL_PRE_PING=true` in backend `.env` and restart the API.
 ## Screenshots
 
 - Patient triage
