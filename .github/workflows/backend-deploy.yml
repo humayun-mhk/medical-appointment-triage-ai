@@ -1,0 +1,62 @@
+name: Deploy Backend to EC2
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "backend/**"
+      - "deploy/aws/**"
+      - ".github/workflows/backend-deploy.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: backend-ec2-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      APP_DIR: /home/ubuntu/healthcare-appointment-system
+      EC2_USER: ${{ secrets.EC2_USER }}
+      EC2_HOST: ${{ secrets.EC2_HOST }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/ec2_key
+          chmod 600 ~/.ssh/ec2_key
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+
+      - name: Sync project to EC2
+        run: |
+          rsync -az --delete \
+            --exclude ".git" \
+            --exclude ".github" \
+            --exclude "backend/.env" \
+            --exclude "backend/venv" \
+            --exclude "backend/__pycache__" \
+            --exclude "backend/.pytest_cache" \
+            --exclude "backend/pytest-cache-files-*" \
+            --exclude "frontend/node_modules" \
+            --exclude "frontend/dist" \
+            -e "ssh -i ~/.ssh/ec2_key" \
+            ./ "$EC2_USER@$EC2_HOST:$APP_DIR/"
+
+      - name: Install backend dependencies and restart service
+        run: |
+          ssh -i ~/.ssh/ec2_key "$EC2_USER@$EC2_HOST" << 'EOF'
+            set -e
+            cd /home/ubuntu/healthcare-appointment-system/backend
+            python3 -m venv venv
+            . venv/bin/activate
+            pip install --upgrade pip
+            pip install -r requirements.txt
+            alembic upgrade head
+            sudo systemctl restart healthcare-api
+            sudo systemctl status healthcare-api --no-pager
+          EOF
