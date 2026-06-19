@@ -1,5 +1,7 @@
 # AI Healthcare Appointment & Safe Triage Platform
 
+Live Demo: https://medical-appointment-triage-ai.vercel.app/
+
 A production-style healthcare appointment system with AI triage, safe specialty routing, RAG-based policy knowledge, doctor dashboards, admin analytics, notifications, human review, and audit logs.
 
 ## Medical Safety Disclaimer
